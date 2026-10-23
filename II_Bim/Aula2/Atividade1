@@ -1,0 +1,287 @@
+-- ============================================================
+-- TECHMARKET — CAMADA DE VIEWS (MySQL)
+-- Pré-requisito: executar antes o script views_class.sql
+-- (cria e popula o banco db_techmarket).
+-- Regra de negócio: só pedidos com status 'Faturado' contam como faturamento.
+-- ============================================================
+USE db_techmarket;
+
+-- ============================================================
+-- MISSÃO 1 — vw_vendas_detalhadas
+-- ============================================================
+CREATE OR REPLACE VIEW vw_vendas_detalhadas AS
+SELECT
+    p.id_pedido,
+    p.data_pedido,
+    c.id_cliente,
+    c.nome                AS cliente,
+    c.cidade,
+    c.estado,
+    v.id_vendedor,
+    v.nome                AS vendedor,
+    v.equipe,
+    pr.id_produto,
+    pr.descricao          AS produto,
+    pr.categoria,
+    i.id_item,
+    i.quantidade,
+    i.preco_unitario,
+    i.desconto_percentual,
+    ROUND(i.quantidade * i.preco_unitario, 2)                                        AS valor_bruto,
+    ROUND(i.quantidade * i.preco_unitario * i.desconto_percentual / 100, 2)          AS desconto_reais,
+    ROUND(i.quantidade * i.preco_unitario - i.quantidade * i.preco_unitario * i.desconto_percentual / 100, 2) AS valor_faturado
+FROM itens_pedido i
+JOIN pedidos    p  ON p.id_pedido   = i.id_pedido
+JOIN clientes   c  ON c.id_cliente  = p.id_cliente
+JOIN vendedores v  ON v.id_vendedor = p.id_vendedor
+JOIN produtos   pr ON pr.id_produto = i.id_produto
+WHERE p.status_pedido = 'Faturado';
+
+-- 1.1 Todas as vendas, do maior para o menor valor faturado
+SELECT *
+FROM vw_vendas_detalhadas
+ORDER BY valor_faturado DESC, id_item;
+
+-- 1.2 Cinco itens de maior valor faturado (cliente e produto)
+SELECT id_item, id_pedido, cliente, produto, valor_faturado
+FROM vw_vendas_detalhadas
+ORDER BY valor_faturado DESC, id_item
+LIMIT 5;
+
+-- 1.3 Vendas para clientes do Paraná, por data da operação
+SELECT id_pedido, data_pedido, cliente, cidade, estado, produto, valor_faturado
+FROM vw_vendas_detalhadas
+WHERE estado = 'PR'
+ORDER BY data_pedido, id_pedido, id_item;
+
+-- ============================================================
+-- MISSÃO 2 — vw_desempenho_vendedores
+-- ============================================================
+-- COUNT(DISTINCT id_pedido) evita contar o mesmo pedido várias vezes
+-- quando ele tem mais de um item. LEFT JOIN mantém vendedores sem vendas (zeros).
+CREATE OR REPLACE VIEW vw_desempenho_vendedores AS
+SELECT
+    v.id_vendedor,
+    v.nome                                   AS vendedor,
+    v.equipe,
+    COUNT(DISTINCT d.id_pedido)              AS qtd_pedidos,
+    COALESCE(SUM(d.quantidade), 0)           AS unidades_vendidas,
+    COALESCE(SUM(d.valor_faturado), 0)       AS faturamento
+FROM vendedores v
+LEFT JOIN vw_vendas_detalhadas d ON d.id_vendedor = v.id_vendedor
+GROUP BY v.id_vendedor, v.nome, v.equipe;
+
+-- 2.1 Ranking de vendedores por faturamento, com ticket médio por pedido
+SELECT
+    vendedor, equipe, qtd_pedidos, faturamento,
+    ROUND(faturamento / NULLIF(qtd_pedidos, 0), 2) AS ticket_medio
+FROM vw_desempenho_vendedores
+ORDER BY faturamento DESC;
+
+-- 2.2 Faturamento total e quantidade de pedidos por equipe
+-- (cada pedido pertence a um único vendedor, logo a soma não duplica pedidos)
+SELECT
+    equipe,
+    SUM(qtd_pedidos) AS qtd_pedidos,
+    SUM(faturamento) AS faturamento_total
+FROM vw_desempenho_vendedores
+GROUP BY equipe
+ORDER BY faturamento_total DESC;
+
+-- ============================================================
+-- MISSÃO 3 — vw_desempenho_produtos
+-- ============================================================
+CREATE OR REPLACE VIEW vw_desempenho_produtos AS
+SELECT
+    pr.id_produto,
+    pr.descricao                             AS produto,
+    pr.categoria,
+    COALESCE(SUM(d.quantidade), 0)           AS unidades_vendidas,
+    COUNT(DISTINCT d.id_pedido)              AS qtd_pedidos,
+    COALESCE(SUM(d.valor_faturado), 0)       AS receita
+FROM produtos pr
+LEFT JOIN vw_vendas_detalhadas d ON d.id_produto = pr.id_produto
+GROUP BY pr.id_produto, pr.descricao, pr.categoria;
+
+-- 3.1 Produtos com maior receita
+SELECT produto, categoria, unidades_vendidas, receita
+FROM vw_desempenho_produtos
+ORDER BY receita DESC;
+
+-- 3.2 Categorias com faturamento superior a R$ 2.000,00
+SELECT
+    categoria,
+    SUM(unidades_vendidas) AS unidades_vendidas,
+    SUM(receita)           AS faturamento
+FROM vw_desempenho_produtos
+GROUP BY categoria
+HAVING SUM(receita) > 2000
+ORDER BY faturamento DESC;
+
+-- 3.3 Três produtos com maior valor médio faturado por unidade
+SELECT
+    produto, categoria, unidades_vendidas, receita,
+    ROUND(receita / NULLIF(unidades_vendidas, 0), 2) AS valor_medio_por_unidade
+FROM vw_desempenho_produtos
+WHERE unidades_vendidas > 0
+ORDER BY valor_medio_por_unidade DESC
+LIMIT 3;
+
+-- ============================================================
+-- MISSÃO 4 — vw_resumo_clientes
+-- ============================================================
+-- LEFT JOIN: clientes sem compras faturadas aparecem com zeros.
+CREATE OR REPLACE VIEW vw_resumo_clientes AS
+SELECT
+    c.id_cliente,
+    c.nome                                   AS cliente,
+    c.cidade,
+    c.estado,
+    COUNT(DISTINCT d.id_pedido)              AS qtd_pedidos,
+    COALESCE(SUM(d.valor_faturado), 0)       AS valor_total
+FROM clientes c
+LEFT JOIN vw_vendas_detalhadas d ON d.id_cliente = c.id_cliente
+GROUP BY c.id_cliente, c.nome, c.cidade, c.estado;
+
+-- 4.1 Ranking de clientes por valor acumulado, com ticket médio
+SELECT
+    cliente, estado, qtd_pedidos, valor_total,
+    ROUND(valor_total / NULLIF(qtd_pedidos, 0), 2) AS ticket_medio
+FROM vw_resumo_clientes
+ORDER BY valor_total DESC;
+
+-- 4.2 Classificação dos clientes
+SELECT
+    cliente, valor_total,
+    CASE
+        WHEN valor_total >= 5000 THEN 'VIP'
+        WHEN valor_total > 0     THEN 'Regular'
+        ELSE 'Sem compras'
+    END AS grupo
+FROM vw_resumo_clientes
+ORDER BY valor_total DESC;
+
+-- 4.3 Por estado: faturamento total, clientes cadastrados e média por cliente
+SELECT
+    estado,
+    SUM(valor_total)                    AS faturamento_total,
+    COUNT(*)                            AS clientes_cadastrados,
+    ROUND(SUM(valor_total) / COUNT(*), 2) AS media_por_cliente
+FROM vw_resumo_clientes
+GROUP BY estado
+ORDER BY faturamento_total DESC;
+
+-- ============================================================
+-- MISSÃO 5 — Painel executivo (somente VIEWS como fonte)
+-- ============================================================
+-- 5.1 Equipes: pedidos, faturamento e ticket médio (vw_desempenho_vendedores)
+SELECT
+    equipe,
+    SUM(qtd_pedidos)                                            AS qtd_pedidos,
+    SUM(faturamento)                                            AS faturamento,
+    ROUND(SUM(faturamento) / NULLIF(SUM(qtd_pedidos), 0), 2)    AS ticket_medio
+FROM vw_desempenho_vendedores
+GROUP BY equipe
+ORDER BY faturamento DESC;
+
+-- 5.2 Categorias: faturamento e % de participação (vw_desempenho_produtos)
+SELECT
+    categoria,
+    SUM(receita) AS faturamento,
+    ROUND(100 * SUM(receita) / (SELECT SUM(receita) FROM vw_desempenho_produtos), 2) AS pct_participacao
+FROM vw_desempenho_produtos
+GROUP BY categoria
+ORDER BY faturamento DESC;
+
+-- 5.3 Clientes acima da média de quem comprou (vw_resumo_clientes)
+SELECT
+    cliente, estado, valor_total,
+    ROUND(valor_total - (SELECT AVG(valor_total) FROM vw_resumo_clientes WHERE qtd_pedidos > 0), 2) AS diferenca_media
+FROM vw_resumo_clientes
+WHERE valor_total > (SELECT AVG(valor_total) FROM vw_resumo_clientes WHERE qtd_pedidos > 0)
+ORDER BY valor_total DESC;
+
+-- ============================================================
+-- MISSÃO 6 — Atualização da view (desconto total por vendedor)
+-- ============================================================
+-- Campos antigos preservados na mesma ordem; novo campo ao final.
+CREATE OR REPLACE VIEW vw_desempenho_vendedores AS
+SELECT
+    v.id_vendedor,
+    v.nome                                   AS vendedor,
+    v.equipe,
+    COUNT(DISTINCT d.id_pedido)              AS qtd_pedidos,
+    COALESCE(SUM(d.quantidade), 0)           AS unidades_vendidas,
+    COALESCE(SUM(d.valor_faturado), 0)       AS faturamento,
+    COALESCE(SUM(d.desconto_reais), 0)       AS desconto_total
+FROM vendedores v
+LEFT JOIN vw_vendas_detalhadas d ON d.id_vendedor = v.id_vendedor
+GROUP BY v.id_vendedor, v.nome, v.equipe;
+
+-- Novo relatório: desconto concedido por vendedor
+SELECT vendedor, equipe, faturamento, desconto_total
+FROM vw_desempenho_vendedores
+ORDER BY desconto_total DESC;
+
+-- Reexecução dos relatórios anteriores (2.1, 2.2 e 5.1), sem alteração
+SELECT vendedor, equipe, qtd_pedidos, faturamento,
+       ROUND(faturamento / NULLIF(qtd_pedidos, 0), 2) AS ticket_medio
+FROM vw_desempenho_vendedores
+ORDER BY faturamento DESC;
+
+SELECT equipe, SUM(qtd_pedidos) AS qtd_pedidos, SUM(faturamento) AS faturamento_total
+FROM vw_desempenho_vendedores
+GROUP BY equipe
+ORDER BY faturamento_total DESC;
+
+SELECT equipe, SUM(qtd_pedidos) AS qtd_pedidos, SUM(faturamento) AS faturamento,
+       ROUND(SUM(faturamento) / NULLIF(SUM(qtd_pedidos), 0), 2) AS ticket_medio
+FROM vw_desempenho_vendedores
+GROUP BY equipe
+ORDER BY faturamento DESC;
+
+-- ============================================================
+-- QUESTÕES DE ANÁLISE
+-- ============================================================
+-- 1) Vantagem de modificar uma VIEW em vez de cada relatório:
+--    A lógica fica em um único lugar. Na Missão 6 bastou um CREATE OR REPLACE VIEW
+--    para todos os relatórios passarem a enxergar a nova coluna, sem reescrever nenhum
+--    deles. Isso reduz retrabalho e evita relatórios com regras diferentes.
+--
+-- 2) Tabela original x VIEW:
+--    A tabela guarda os dados fisicamente. A VIEW guarda só a definição de uma consulta
+--    (joins, filtros, cálculos) e se comporta como uma "tabela virtual". Ao consultá-la,
+--    o MySQL executa a query associada.
+--
+-- 3) Uma VIEW tradicional armazena resultados?
+--    Não. Ela guarda apenas a consulta (o MySQL não tem materialized view nativa).
+--    Se os dados das tabelas de origem mudam, a próxima consulta à VIEW já traz os
+--    dados atualizados, porque a query é reexecutada em tempo real.
+--
+-- 4) Se uma VIEW usada por relatórios for excluída:
+--    Os relatórios que dependem dela falham com erro de tabela/view inexistente
+--    (ex.: "Table 'db_techmarket.vw_...' doesn't exist"). Se ela for referenciada por
+--    outras views (como aqui, em que quatro views dependem de vw_vendas_detalhadas),
+--    essas também passam a falhar.
+--
+-- 5) Quando o uso excessivo de VIEWS atrapalha:
+--    - Views aninhadas (view que chama view que chama view) dificultam o debug e
+--      escondem de onde vem cada número.
+--    - Cada consulta reexecuta toda a cadeia de joins e agregações, o que pode ficar
+--      lento com grandes volumes.
+--    - Alterar tabelas-base (renomear ou remover colunas) pode quebrar várias views.
+--    - Nem toda view aceita INSERT/UPDATE/DELETE (agregações, DISTINCT, etc.).
+--    - Quando o dado precisa estar pré-calculado, é melhor usar tabela auxiliar.
+
+-- ============================================================
+-- PARECER GERENCIAL
+-- ============================================================
+-- Em setembro/2026 a TechMarket faturou R$ 27.452,00 em 10 pedidos, com R$ 2.098,00 em descontos concedidos.
+-- A receita é muito concentrada: o Notebook Pro gera R$ 16.425,00 (59,83% do total), o que faz da
+-- categoria Computadores a líder isolada. A equipe Sudeste faturou R$ 16.541,00 em 4 pedidos (ticket médio de
+-- R$ 4.135,25), contra R$ 10.911,00 em 6 pedidos da Sul (ticket médio de R$ 1.818,50); a vendedora Juliana
+-- Ferreira não tem venda faturada. Felipe Costa (R$ 12.725,00) e Ana Souza são os únicos clientes VIP e os únicos
+-- acima da média de R$ 5.490,40 dos compradores. Três dos oito clientes (Daniel, Gabriela e Henrique) não têm
+-- compra faturada; Daniel teve um pedido cancelado e Gabriela um pendente, sendo alvos naturais de recuperação.
+-- Recomenda-se diversificar o mix além dos computadores, reduzir a dependência de poucos clientes e
+-- investigar o desempenho comercial da Juliana.
